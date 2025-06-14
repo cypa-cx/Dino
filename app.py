@@ -335,18 +335,3 @@ if __name__ == "__main__":
         port=7860,
         log_level="info"
     )
-import numpy as np
-
-def alpha_threshold_bbox(image, min_alpha=30):
-    alpha = np.array(image)[:, :, 3]
-    rows = np.any(alpha >= min_alpha, axis=1)
-    cols = np.any(alpha >= min_alpha, axis=0)
-    if not np.any(rows) or not np.any(cols):
-        return image.getbbox()  # fallback
-    top = np.where(rows)[0][0]
-    bottom = np.where(rows)[0][-1] + 1
-    left = np.where(cols)[0][0]
-    right = np.where(cols)[0][-1] + 1
-    return (left, top, right, bottom)
-
-
