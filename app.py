@@ -4,7 +4,6 @@ import base64
 import gc
 import torch
 import requests
-import numpy as np
 from PIL import Image, ExifTags
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -13,7 +12,7 @@ from rembg import remove, new_session
 import uvicorn
 
 # ========================================================================================
-# KONFIGURACJA I MODELE GLOBALNE
+# KONFIGURACJA
 # ========================================================================================
 
 app = FastAPI(title="DINO Embedding API", version="1.0.0")
@@ -38,184 +37,101 @@ class ImageResponse(BaseModel):
     image_base64: str
 
 # ========================================================================================
-# FUNKCJE POMOCNICZE
+# SMART MEMORY MANAGEMENT
+# ========================================================================================
+
+def get_gpu_memory_usage() -> float:
+    """Zwraca zużycie pamięci GPU w GB"""
+    if not torch.cuda.is_available():
+        return 0.0
+    return torch.cuda.memory_allocated() / 1024**3
+
+def should_cleanup() -> bool:
+    """Cleanup TYLKO gdy faktycznie potrzeba"""
+    if torch.cuda.is_available():
+        memory_gb = get_gpu_memory_usage()
+        total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        usage_ratio = memory_gb / total_gb
+        
+        # Cleanup tylko gdy ponad 85% pamięci zajęte
+        if usage_ratio > 0.85:
+            print(f"🧹 Memory cleanup needed: {memory_gb:.2f}/{total_gb:.2f} GB ({usage_ratio*100:.1f}%)")
+            return True
+    
+    return False
+
+def efficient_cleanup():
+    """Wydajne czyszczenie - minimum overhead"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+
+# ========================================================================================
+# OPTIMIZED FUNCTIONS
 # ========================================================================================
 
 def fix_image_orientation(image: Image.Image) -> Image.Image:
-    """Naprawia orientację obrazu na podstawie EXIF"""
+    """Szybka naprawa orientacji - tylko essential cases"""
     try:
-        if hasattr(image, '_getexif') and image._getexif() is not None:
-            exif = image._getexif()
-            
-            # Znajdź tag orientacji
-            orientation_key = None
-            for tag, value in ExifTags.TAGS.items():
-                if value == 'Orientation':
-                    orientation_key = tag
-                    break
-            
-            if orientation_key and orientation_key in exif:
-                orientation = exif[orientation_key]
-                
-                # Mapowanie orientacji na rotację
-                rotations = {3: 180, 6: 270, 8: 90}
-                
-                if orientation in rotations:
-                    image = image.rotate(rotations[orientation], expand=True)
-                    print(f"🔄 Obrócono obraz o {rotations[orientation]}°")
-        
-        return image
-        
-    except Exception as e:
-        print(f"⚠️ Błąd naprawy orientacji: {e}")
-        return image
-
-def cleanup_memory():
-    """Agresywne czyszczenie pamięci"""
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-    gc.collect()
-
-def log_memory_usage(stage: str):
-    """Loguje użycie pamięci GPU"""
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / 1024**3
-        print(f"💾 {stage}: {allocated:.2f} GB GPU")
-
-# ========================================================================================
-# INICJALIZACJA MODELI
-# ========================================================================================
-
-def initialize_models():
-    """Inicjalizacja modeli przy starcie serwera"""
-    global dinov2_model, dinov2_processor, rembg_session
-    
-    print("🔄 Ładowanie modeli...")
-    
-    # DINOv2-Large
-    print("📥 Ładowanie DINOv2-Large...")
-    dinov2_processor = AutoImageProcessor.from_pretrained(
-        'facebook/dinov2-large',
-        cache_dir='/tmp/hf_cache'
-    )
-    dinov2_model = AutoModel.from_pretrained(
-        'facebook/dinov2-large',
-        cache_dir='/tmp/hf_cache'
-    )
-    dinov2_model.eval()
-    
-    # GPU
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    dinov2_model = dinov2_model.to(device)
-    print(f"🎯 DINOv2 załadowany na: {device}")
-    
-    # Rembg
-    print("🖼️ Ładowanie rembg U2Net...")
-    rembg_session = new_session('u2net')
-    
-    print("✅ Wszystkie modele załadowane!")
-
-# ========================================================================================
-# FUNKCJE PRZETWARZANIA OBRAZÓW
-# ========================================================================================
+        exif = getattr(image, '_getexif', lambda: None)()
+        if exif and 274 in exif:  # 274 = Orientation tag
+            orientation = exif[274]
+            rotations = {3: 180, 6: 270, 8: 90}
+            if orientation in rotations:
+                return image.rotate(rotations[orientation], expand=True)
+    except:
+        pass  # Ignore errors - nie warto crashować przez EXIF
+    return image
 
 def download_image(url: str) -> Image.Image:
-    """Pobiera obraz z URL - zachowuje oryginalne rozmiary"""
+    """Szybkie pobieranie z timeout optimization"""
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        response = requests.get(url, headers=headers, timeout=30)
+        headers = {'User-Agent': 'Mozilla/5.0 (compatible; DinoAPI/1.0)'}
+        response = requests.get(url, headers=headers, timeout=15)  # Krótszy timeout
         response.raise_for_status()
         
         image = Image.open(io.BytesIO(response.content))
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
-        print(f"📏 Pobrany obraz: {image.size}")
         return image
-        
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Nie można pobrać obrazu: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Cannot download image: {str(e)}")
 
 def remove_background(image: Image.Image) -> Image.Image:
-    """Usuwa tło za pomocą rembg"""
-    img_bytes = None
-    img_bytes_data = None
-    output = None
-    
+    """rembg z minimalnym overhead"""
     try:
-        # PIL -> bytes
-        img_bytes = io.BytesIO()
-        image.save(img_bytes, format='PNG')
-        img_bytes_data = img_bytes.getvalue()
+        # Konwersja do bytes
+        img_buffer = io.BytesIO()
+        image.save(img_buffer, format='PNG')
+        img_data = img_buffer.getvalue()
+        img_buffer.close()
         
-        # Zamknij i wyczyść buffer
-        img_bytes.close()
-        del img_bytes
-        img_bytes = None
+        # rembg processing
+        output = remove(img_data, session=rembg_session)
+        result = Image.open(io.BytesIO(output)).convert('RGBA')
         
-        # Usuń tło
-        output = remove(img_bytes_data, session=rembg_session)
+        # Cleanup tylko dużych objektów
+        del img_data, output
         
-        # Wyczyść input
-        del img_bytes_data
-        img_bytes_data = None
-        
-        # bytes -> PIL
-        result_image = Image.open(io.BytesIO(output)).convert('RGBA')
-        
-        # Wyczyść output
-        del output
-        output = None
-        
-        print(f"🖼️ Tło usunięte: {result_image.size}")
-        return result_image
-        
+        return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Błąd usuwania tła: {str(e)}")
-    finally:
-        # Cleanup w przypadku błędu
-        for var in [img_bytes, img_bytes_data, output]:
-            if var is not None:
-                del var
-        gc.collect()
+        raise HTTPException(status_code=500, detail=f"Background removal failed: {str(e)}")
 
 def crop_to_content(image: Image.Image) -> Image.Image:
-    """Przycina obraz do granic nieprzezroczystych pikseli"""
-    try:
-        if image.mode != 'RGBA':
-            image = image.convert('RGBA')
-        
-        bbox = image.getbbox()
-        
-        if bbox is None:
-            print("⚠️ Nie znaleziono treści do przycięcia")
-            return image
-        
-        cropped = image.crop(bbox)
-        print(f"✂️ Przycięto z {image.size} do {cropped.size}")
-        return cropped
-        
-    except Exception as e:
-        print(f"❌ Błąd przycinania: {e}")
-        return image
+    """Szybkie przycinanie"""
+    if image.mode != 'RGBA':
+        image = image.convert('RGBA')
+    
+    bbox = image.getbbox()
+    return image.crop(bbox) if bbox else image
 
 def generate_embedding(image: Image.Image) -> list[float]:
-    """Generuje embedding za pomocą DINOv2"""
-    inputs = None
-    outputs = None
-    embedding = None
-    embedding_cpu = None
-    
+    """Optimized embedding generation"""
     try:
-        # Konwersja na RGB
+        # RGB conversion
         if image.mode != 'RGB':
             image = image.convert('RGB')
-        
-        print(f"🧠 Generowanie embeddingu dla: {image.size}")
-        log_memory_usage("Przed embedding")
         
         # Preprocessing
         inputs = dinov2_processor(images=image, return_tensors="pt")
@@ -225,56 +141,67 @@ def generate_embedding(image: Image.Image) -> list[float]:
         # Inference
         with torch.no_grad():
             outputs = dinov2_model(**inputs)
-            embedding = outputs.last_hidden_state[0, 0]  # [CLS] token
-            embedding_cpu = embedding.cpu()
+            # Immediate CPU transfer
+            embedding = outputs.last_hidden_state[0, 0].cpu().numpy().tolist()
         
-        # Konwersja do listy
-        embedding_list = embedding_cpu.numpy().tolist()
+        # Cleanup tensorów (bez gc.collect - za wolne)
+        del inputs, outputs
         
-        print(f"✅ Embedding: {len(embedding_list)} wymiarów")
-        return embedding_list
-        
+        return embedding
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Błąd embeddingu: {str(e)}")
-    finally:
-        # Cleanup wszystkich tensorów
-        for var in [inputs, outputs, embedding, embedding_cpu]:
-            if var is not None:
-                del var
-        
-        cleanup_memory()
-        log_memory_usage("Po embedding")
+        raise HTTPException(status_code=500, detail=f"Embedding generation failed: {str(e)}")
 
 def image_to_base64(image: Image.Image) -> str:
-    """Konwertuje obraz PIL na base64"""
-    buffer = None
-    img_bytes = None
+    """Konwersja do base64 - zachowuje original quality"""
+    buffer = io.BytesIO()
     
-    try:
-        buffer = io.BytesIO()
-        
-        # Wybierz format na podstawie trybu
-        if image.mode == 'RGBA':
-            image.save(buffer, format='PNG')
-        else:
-            image.save(buffer, format='JPEG', quality=95)
-        
-        img_bytes = buffer.getvalue()
-        img_base64 = base64.b64encode(img_bytes).decode('utf-8')
-        
-        print(f"📦 Base64 length: {len(img_base64)}")
-        return img_base64
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Błąd base64: {str(e)}")
-    finally:
-        # Cleanup
-        if buffer:
-            buffer.close()
-        for var in [buffer, img_bytes]:
-            if var is not None:
-                del var
-        gc.collect()
+    # Format jak w oryginalnej wersji
+    if image.mode == 'RGBA':
+        image.save(buffer, format='PNG')
+    else:
+        image.save(buffer, format='JPEG', quality=95)  # Original quality
+    
+    b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    buffer.close()
+    
+    return b64
+
+# ========================================================================================
+# INITIALIZATION
+# ========================================================================================
+
+def initialize_models():
+    """Inicjalizacja modeli"""
+    global dinov2_model, dinov2_processor, rembg_session
+    
+    print("🔄 Loading models...")
+    
+    # DINOv2-Large
+    dinov2_processor = AutoImageProcessor.from_pretrained(
+        'facebook/dinov2-large',
+        cache_dir='/tmp/hf_cache'
+    )
+    dinov2_model = AutoModel.from_pretrained(
+        'facebook/dinov2-large', 
+        cache_dir='/tmp/hf_cache'
+    ).eval()
+    
+    # GPU
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    dinov2_model = dinov2_model.to(device)
+    
+    # Optimize model for inference
+    if torch.cuda.is_available():
+        dinov2_model = torch.jit.optimize_for_inference(dinov2_model)
+    
+    # rembg
+    rembg_session = new_session('u2net')
+    
+    print("✅ Models loaded and optimized!")
+    if torch.cuda.is_available():
+        memory_gb = get_gpu_memory_usage()
+        total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(f"💾 GPU Memory: {memory_gb:.2f}/{total_gb:.2f} GB ({memory_gb/total_gb*100:.1f}%)")
 
 # ========================================================================================
 # ENDPOINTS
@@ -282,15 +209,13 @@ def image_to_base64(image: Image.Image) -> str:
 
 @app.on_event("startup")
 async def startup_event():
-    """Inicjalizacja przy starcie"""
     initialize_models()
 
 @app.get("/")
 async def root():
-    """Endpoint główny"""
     return {
         "status": "healthy",
-        "message": "DINO Embedding API is running! 🦕✨",
+        "message": "DINO Embedding API - Optimized & Stable 🦕⚡",
         "gpu_available": torch.cuda.is_available(),
         "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
         "model_info": {
@@ -302,129 +227,85 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check z informacjami o pamięci"""
+    """Health check z info o pamięci"""
     memory_info = {}
     if torch.cuda.is_available():
+        allocated = get_gpu_memory_usage()
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
         memory_info = {
-            "allocated_gb": round(torch.cuda.memory_allocated() / 1024**3, 3),
-            "reserved_gb": round(torch.cuda.memory_reserved() / 1024**3, 3),
-            "max_allocated_gb": round(torch.cuda.max_memory_allocated() / 1024**3, 3),
-            "free_gb": round((torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()) / 1024**3, 3)
+            "allocated_gb": round(allocated, 2),
+            "total_gb": round(total, 2), 
+            "usage_percent": round((allocated/total)*100, 1),
+            "free_gb": round(total - allocated, 2)
         }
     
     return {
         "status": "ok",
         "models_loaded": dinov2_model is not None and rembg_session is not None,
         "gpu_available": torch.cuda.is_available(),
-        "memory_info": memory_info
+        "memory_info": memory_info,
+        "requests_processed": request_counter
     }
 
 @app.get("/stats")
 async def get_stats():
-    """Statystyki API"""
-    global request_counter
-    
+    """Szczegółowe statystyki"""
     stats = {
         "total_requests": request_counter,
-        "cuda_available": torch.cuda.is_available(),
+        "cuda_available": torch.cuda.is_available()
     }
     
     if torch.cuda.is_available():
+        allocated = get_gpu_memory_usage()
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
         stats["gpu_memory"] = {
-            "allocated_gb": round(torch.cuda.memory_allocated() / 1024**3, 3),
-            "reserved_gb": round(torch.cuda.memory_reserved() / 1024**3, 3),
-            "max_allocated_gb": round(torch.cuda.max_memory_allocated() / 1024**3, 3),
-            "free_gb": round((torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()) / 1024**3, 3)
+            "allocated_gb": round(allocated, 2),
+            "total_gb": round(total, 2),
+            "usage_percent": round((allocated/total)*100, 1)
         }
     
     return stats
 
-@app.get("/memory/clear")
-async def clear_memory():
+@app.post("/memory/cleanup")
+async def manual_cleanup():
     """Ręczne czyszczenie pamięci"""
-    cleanup_memory()
-    
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-    
+    efficient_cleanup()
+    memory_gb = get_gpu_memory_usage()
     return {
-        "status": "memory_cleared",
-        "message": "GPU cache and Python garbage collector cleared"
+        "status": "cleanup_completed", 
+        "gpu_memory_gb": round(memory_gb, 2)
     }
 
 @app.post("/process", response_model=ImageResponse)
 async def process_image(request: ImageRequest):
     """
-    Główny endpoint przetwarzania obrazów
-    Zachowuje oryginalne rozmiary i agresywnie czyści pamięć
+    Główny endpoint - zoptymalizowany dla szybkości i stabilności
     """
     global request_counter
     request_counter += 1
     
-    # Zmienne do cleanup
-    original_image = None
-    fixed_image = None
-    no_bg_image = None
-    cropped_image = None
-    rgb_image = None
-    
     try:
-        print(f"\n🔄 REQUEST #{request_counter}: {request.image_url}")
-        log_memory_usage("Start")
+        print(f"🔄 Request #{request_counter}: Processing...")
         
-        # 1. Pobierz obraz
-        print("📥 Pobieranie...")
-        original_image = download_image(request.image_url)
+        # Smart cleanup - TYLKO gdy pamięć się zapełnia
+        if should_cleanup():
+            efficient_cleanup()
+            print(f"🧹 Memory cleanup performed after request #{request_counter}")
         
-        # 2. Napraw orientację
-        print("🔄 Orientacja...")
-        fixed_image = fix_image_orientation(original_image)
+        # Processing pipeline
+        image = download_image(request.image_url)
+        image = fix_image_orientation(image)
+        image = remove_background(image)
+        image = crop_to_content(image)
         
-        # Cleanup oryginalnego jeśli się zmienił
-        if fixed_image is not original_image:
-            del original_image
-            original_image = None
-            gc.collect()
-        
-        # 3. Usuń tło
-        print("🖼️ Usuwanie tła...")
-        no_bg_image = remove_background(fixed_image)
-        
-        del fixed_image
-        fixed_image = None
-        gc.collect()
-        
-        # 4. Przytnij
-        print("✂️ Przycinanie...")
-        cropped_image = crop_to_content(no_bg_image)
-        
-        if cropped_image is not no_bg_image:
-            del no_bg_image
-            no_bg_image = None
-            gc.collect()
-        
-        # 5. Embedding
-        print("🧠 Embedding...")
-        rgb_image = cropped_image.convert('RGB')
+        # Embedding generation
+        rgb_image = image.convert('RGB')
         embedding = generate_embedding(rgb_image)
         
-        del rgb_image
-        rgb_image = None
-        gc.collect()
+        # Base64 conversion
+        image_base64 = image_to_base64(image)
         
-        # 6. Base64
-        print("📦 Base64...")
-        image_base64 = image_to_base64(cropped_image)
-        
-        del cropped_image
-        cropped_image = None
-        gc.collect()
-        
-        # Finalne czyszczenie
-        cleanup_memory()
-        log_memory_usage("Koniec")
-        
-        print(f"✅ REQUEST #{request_counter}: SUKCES")
+        print(f"✅ Request #{request_counter}: Completed")
         
         return ImageResponse(
             embedding=embedding,
@@ -434,33 +315,20 @@ async def process_image(request: ImageRequest):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ REQUEST #{request_counter}: BŁĄD - {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Błąd przetwarzania: {str(e)}")
-    finally:
-        # KRYTYCZNE: Cleanup wszystkich zmiennych
-        for var_name, var_obj in [
-            ('original_image', original_image),
-            ('fixed_image', fixed_image),
-            ('no_bg_image', no_bg_image),
-            ('cropped_image', cropped_image),
-            ('rgb_image', rgb_image)
-        ]:
-            if var_obj is not None:
-                del var_obj
-        
-        # Agresywne czyszczenie
-        cleanup_memory()
-        print(f"🧹 REQUEST #{request_counter}: Pamięć wyczyszczona")
+        print(f"❌ Request #{request_counter}: Error - {str(e)}")
+        # Cleanup po błędzie
+        efficient_cleanup()
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 # ========================================================================================
-# URUCHOMIENIE
+# STARTUP
 # ========================================================================================
 
 if __name__ == "__main__":
-    print("🚀 Uruchamianie DINO Embedding API...")
+    print("🚀 Starting DINO Embedding API - Optimized Version")
     uvicorn.run(
         app,
-        host="0.0.0.0",
+        host="0.0.0.0", 
         port=7860,
         log_level="info"
     )
