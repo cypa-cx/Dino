@@ -349,11 +349,4 @@ def alpha_threshold_bbox(image, min_alpha=30):
     right = np.where(cols)[0][-1] + 1
     return (left, top, right, bottom)
 
-def expand_bbox(bbox, margin, image_size):
-    left, top, right, bottom = bbox
-    return (
-        max(0, left - margin),
-        max(0, top - margin),
-        min(image_size[0], right + margin),
-        min(image_size[1], bottom + margin)
-    )
+
