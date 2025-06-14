@@ -190,9 +190,12 @@ def initialize_models():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dinov2_model = dinov2_model.to(device)
     
-    # Optimize model for inference
+    # Optimize model for inference (bez JIT - nie wszystkie modele to wspierają)
     if torch.cuda.is_available():
-        dinov2_model = torch.jit.optimize_for_inference(dinov2_model)
+        # Ustaw model w trybie inference
+        dinov2_model.eval()
+        for param in dinov2_model.parameters():
+            param.requires_grad = False
     
     # rembg
     rembg_session = new_session('u2net')
