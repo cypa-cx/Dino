@@ -4,6 +4,7 @@ import base64
 import gc
 import torch
 import requests
+import numpy as np
 from PIL import Image, ExifTags
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -67,8 +68,21 @@ def efficient_cleanup():
     gc.collect()
 
 # ========================================================================================
-# OPTIMIZED FUNCTIONS
+# IMAGE PROCESSING FUNCTIONS
 # ========================================================================================
+
+def alpha_threshold_bbox(image, min_alpha=30):
+    """Znajduje bounding box na podstawie pikseli z alpha >= min_alpha"""
+    alpha = np.array(image)[:, :, 3]
+    rows = np.any(alpha >= min_alpha, axis=1)
+    cols = np.any(alpha >= min_alpha, axis=0)
+    if not np.any(rows) or not np.any(cols):
+        return image.getbbox()  # fallback
+    top = np.where(rows)[0][0]
+    bottom = np.where(rows)[0][-1] + 1
+    left = np.where(cols)[0][0]
+    right = np.where(cols)[0][-1] + 1
+    return (left, top, right, bottom)
 
 def fix_image_orientation(image: Image.Image) -> Image.Image:
     """Szybka naprawa orientacji - tylko essential cases"""
@@ -119,11 +133,11 @@ def remove_background(image: Image.Image) -> Image.Image:
         raise HTTPException(status_code=500, detail=f"Background removal failed: {str(e)}")
 
 def crop_to_content(image: Image.Image) -> Image.Image:
-    """Szybkie przycinanie"""
+    """Przycinanie z progiem alpha >= 30"""
     if image.mode != 'RGBA':
         image = image.convert('RGBA')
     
-    bbox = image.getbbox()
+    bbox = alpha_threshold_bbox(image, min_alpha=30)
     return image.crop(bbox) if bbox else image
 
 def generate_embedding(image: Image.Image) -> list[float]:
