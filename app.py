@@ -24,11 +24,17 @@ def initialize_vortex():
     try:
         # Save current working directory
         original_cwd = os.getcwd()
-        vortex_path = os.path.join(original_cwd, 'VORTEX')
+        
+        # Use absolute path to ensure we find VORTEX
+        vortex_path = '/workspace/Dino/VORTEX'
         
         if not os.path.exists(vortex_path):
             print(f"❌ VORTEX path not found: {vortex_path}")
-            return False
+            # Try relative path as fallback
+            vortex_path = os.path.join(original_cwd, 'VORTEX')
+            if not os.path.exists(vortex_path):
+                print(f"❌ VORTEX path also not found: {vortex_path}")
+                return False
         
         print(f"✅ VORTEX path found: {vortex_path}")
         
