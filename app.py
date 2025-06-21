@@ -198,7 +198,7 @@ def initialize_vortex():
         VORTEX_AVAILABLE = False
         return False
 
-class ModelType(str, Enum):
+class ModelType(str, enum.Enum):
     dinov2 = "dinov2"
     vortex = "vortex"
 
