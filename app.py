@@ -18,26 +18,50 @@ VORTEX_AVAILABLE = False
 vortex_feature_extractor = None
 
 def initialize_vortex():
-    """Initialize VORTEX with proper error handling"""
+    """Initialize VORTEX with proper error handling and working directory"""
     global VORTEX_AVAILABLE, vortex_feature_extractor
     
     try:
-        # Add VORTEX to Python path
-        vortex_path = os.path.join(os.getcwd(), 'VORTEX')
-        if os.path.exists(vortex_path):
-            sys.path.insert(0, vortex_path)
-            print(f"✅ VORTEX path added: {vortex_path}")
-        else:
+        # Save current working directory
+        original_cwd = os.getcwd()
+        vortex_path = os.path.join(original_cwd, 'VORTEX')
+        
+        if not os.path.exists(vortex_path):
             print(f"❌ VORTEX path not found: {vortex_path}")
             return False
         
+        print(f"✅ VORTEX path found: {vortex_path}")
+        
+        # Add VORTEX to Python path
+        sys.path.insert(0, vortex_path)
+        
+        # Change to VORTEX directory (needed for weight files)
+        os.chdir(vortex_path)
+        print(f"🔄 Changed working directory to: {os.getcwd()}")
+        
+        # Verify required files exist
+        required_files = ['models.py', 'RAE_LCG_weights.pkl']
+        for file in required_files:
+            if not os.path.exists(file):
+                print(f"❌ Required file missing: {file}")
+                os.chdir(original_cwd)  # Restore original directory
+                return False
+            print(f"✅ Found required file: {file}")
+        
         # Try importing VORTEX
         from models import VORTEX
+        print("✅ VORTEX module imported successfully")
         
         # Initialize VORTEX with BeiTv2-Large
         backbone = 'beitv2_large_patch16_224.in1k_ft_in22k_in1k'
         input_size = 224
+        print(f"🔄 Initializing VORTEX with backbone: {backbone}")
+        
         vortex_feature_extractor = VORTEX(backbone, input_size)
+        
+        # Restore original working directory
+        os.chdir(original_cwd)
+        print(f"🔄 Restored working directory to: {os.getcwd()}")
         
         VORTEX_AVAILABLE = True
         print("✅ VORTEX (BeiTv2-Large) loaded successfully!")
@@ -45,10 +69,20 @@ def initialize_vortex():
         
     except ImportError as e:
         print(f"⚠️ VORTEX import failed: {e}")
+        # Restore working directory on error
+        try:
+            os.chdir(original_cwd)
+        except:
+            pass
         VORTEX_AVAILABLE = False
         return False
     except Exception as e:
         print(f"❌ VORTEX initialization failed: {e}")
+        # Restore working directory on error
+        try:
+            os.chdir(original_cwd)
+        except:
+            pass
         VORTEX_AVAILABLE = False
         return False
 
@@ -56,10 +90,22 @@ def initialize_vortex():
 # CONFIGURATION
 # ========================================================================================
 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    print("🔄 Starting application...")
+    initialize_models()
+    yield
+    # Shutdown
+    print("🔄 Shutting down application...")
+
 app = FastAPI(
     title="DINO + VORTEX Embedding API", 
     version="2.0.0",
-    description="DINOv2 + VORTEX texture analysis endpoints"
+    description="DINOv2 + VORTEX texture analysis endpoints",
+    lifespan=lifespan
 )
 
 # Global models
@@ -296,9 +342,7 @@ def generate_vortex_embedding(image: Image.Image) -> list[float]:
 # ENDPOINTS
 # ========================================================================================
 
-@app.on_event("startup")
-async def startup_event():
-    initialize_models()
+# Usunięte - zastąpione przez lifespan
 
 @app.get("/", response_model=HealthResponse)
 async def root():
@@ -490,9 +534,26 @@ if __name__ == "__main__":
     Copyright (c) 2025 scabini - Licensed under MIT License
     https://github.com/scabini/VORTEX
     """)
+    
+    # Find available port
+    import socket
+    def find_free_port():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('', 0))
+            return s.getsockname()[1]
+    
+    # Try port 7860, if busy use random free port
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('0.0.0.0', 7860))
+            port = 7860
+    except OSError:
+        port = find_free_port()
+        print(f"⚠️ Port 7860 busy, using port {port}")
+    
     uvicorn.run(
         app,
         host="0.0.0.0", 
-        port=7860,
+        port=port,
         log_level="info"
     )
