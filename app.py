@@ -320,21 +320,35 @@ def initialize_vortex():
         VORTEX_AVAILABLE = False
         return False
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    print("🔄 Starting application...")
-    initialize_models()
-    yield
-    # Shutdown
-    print("🔄 Shutting down application...")
+# FastAPI app setup with fallback for older versions
+if HAS_ASYNCCONTEXTMANAGER:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Startup
+        print("🔄 Starting application...")
+        initialize_models()
+        yield
+        # Shutdown
+        print("🔄 Shutting down application...")
 
-app = FastAPI(
-    title="DINO + VORTEX Embedding API", 
-    version="2.0.0",
-    description="DINOv2 + VORTEX texture analysis endpoints with advanced filtering",
-    lifespan=lifespan
-)
+    app = FastAPI(
+        title="DINO + VORTEX Embedding API", 
+        version="2.0.0",
+        description="DINOv2 + VORTEX texture analysis endpoints with advanced filtering",
+        lifespan=lifespan
+    )
+else:
+    # Fallback for older FastAPI versions
+    app = FastAPI(
+        title="DINO + VORTEX Embedding API", 
+        version="2.0.0",
+        description="DINOv2 + VORTEX texture analysis endpoints with advanced filtering"
+    )
+    
+    @app.on_event("startup")
+    async def startup_event():
+        print("🔄 Starting application...")
+        initialize_models()
 
 # Global models
 dinov2_model = None
