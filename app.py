@@ -106,6 +106,204 @@ def initialize_vortex():
         VORTEX_AVAILABLE = False
         return False
 
+# VORTEX Integration - Fixed Import Path
+VORTEX_AVAILABLE = False
+vortex_feature_extractor = None
+
+def initialize_vortex():
+    """Initialize VORTEX with proper error handling and auto-cloning"""
+    global VORTEX_AVAILABLE, vortex_feature_extractor
+    
+    try:
+        # Save current working directory
+        original_cwd = os.getcwd()
+        
+        # Use absolute path to ensure we find VORTEX
+        vortex_path = '/workspace/Dino/VORTEX'
+        
+        # If VORTEX doesn't exist, try to clone it
+        if not os.path.exists(vortex_path):
+            print(f"⚠️ VORTEX not found at {vortex_path}, attempting to clone...")
+            try:
+                import subprocess
+                os.chdir('/workspace/Dino')
+                result = subprocess.run(['git', 'clone', 'https://github.com/scabini/VORTEX.git'], 
+                                      capture_output=True, text=True, timeout=60)
+                if result.returncode == 0:
+                    print("✅ VORTEX cloned successfully!")
+                else:
+                    print(f"❌ VORTEX clone failed: {result.stderr}")
+                    return False
+            except Exception as e:
+                print(f"❌ Failed to clone VORTEX: {e}")
+                return False
+        
+        # Check again if VORTEX exists
+        if not os.path.exists(vortex_path):
+            print(f"❌ VORTEX still not found after clone attempt: {vortex_path}")
+            return False
+        
+        print(f"✅ VORTEX path found: {vortex_path}")
+        
+        # Add VORTEX to Python path
+        sys.path.insert(0, vortex_path)
+        
+        # Change to VORTEX directory (needed for weight files)
+        os.chdir(vortex_path)
+        print(f"🔄 Changed working directory to: {os.getcwd()}")
+        
+        # Verify required files exist
+        required_files = ['models.py', 'RAE_LCG_weights.pkl']
+        for file in required_files:
+            if not os.path.exists(file):
+                print(f"❌ Required file missing: {file}")
+                os.chdir(original_cwd)  # Restore original directory
+                return False
+            print(f"✅ Found required file: {file}")
+        
+        # Try importing VORTEX
+        from models import VORTEX
+        print("✅ VORTEX module imported successfully")
+        
+        # Initialize VORTEX with BeiTv2-Large
+        backbone = 'beitv2_large_patch16_224.in1k_ft_in22k_in1k'
+        input_size = 224
+        print(f"🔄 Initializing VORTEX with backbone: {backbone}")
+        
+        vortex_feature_extractor = VORTEX(backbone, input_size)
+        
+        # Restore original working directory
+        os.chdir(original_cwd)
+        print(f"🔄 Restored working directory to: {os.getcwd()}")
+        
+        VORTEX_AVAILABLE = True
+        print("✅ VORTEX (BeiTv2-Large) loaded successfully!")
+        return True
+        
+    except ImportError as e:
+        print(f"⚠️ VORTEX import failed: {e}")
+        # Restore working directory on error
+        try:
+            os.chdir(original_cwd)
+        except:
+            pass
+        VORTEX_AVAILABLE = False
+        return False
+    except Exception as e:
+        print(f"❌ VORTEX initialization failed: {e}")
+        # Restore working directory on error
+        try:
+            os.chdir(original_cwd)
+        except:
+            pass
+        VORTEX_AVAILABLE = False
+        return False
+
+class ModelType(str, Enum):
+    dinov2 = "dinov2"
+    vortex = "vortex"
+
+class ImageRequest(BaseModel):
+    image_url: str
+    model: ModelType = ModelType.dinov2  # Default to DINOv2
+    crop: bool = True  # Default to crop (current behavior)
+    high_pass: bool = False  # Apply high pass filter for detail enhancement
+    canny: bool = False  # Apply Canny edge detection
+
+class ImageResponse(BaseModel):
+    embedding: list[float]
+    image_base64: str
+    model_used: str
+    embedding_dimensions: int
+    background_removed: bool  # Indicates if background was removed and cropped
+    filters_applied: list[str]  # List of applied filters
+
+class HealthResponse(BaseModel):
+    status: str
+    message: str
+    models_available: dict
+    gpu_info: dict
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    print("🔄 Starting application...")
+    initialize_models()
+    yield
+    # Shutdown
+    print("🔄 Shutting down application...")
+
+app = FastAPI(
+    title="DINO + VORTEX Embedding API", 
+    version="2.0.0",
+    description="DINOv2 + VORTEX texture analysis endpoints with advanced filtering",
+    lifespan=lifespan
+)
+
+# Global models
+dinov2_model = None
+dinov2_processor = None
+rembg_session = None
+
+# Statistics
+request_counter = 0
+# IMAGE FILTERING FUNCTIONS
+# ========================================================================================
+
+def apply_high_pass_filter(image: Image.Image, kernel_size: int = 3) -> Image.Image:
+    """Apply high pass filter to enhance details and edges"""
+    try:
+        # Convert PIL to numpy array
+        img_array = np.array(image)
+        
+        # Convert to BGR for OpenCV (if RGB)
+        if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+            img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        else:
+            img_bgr = img_array
+        
+        # Apply Gaussian blur
+        blurred = cv2.GaussianBlur(img_bgr, (kernel_size, kernel_size), 0)
+        
+        # High pass = Original - Blurred + 128 (offset for visibility)
+        high_pass = cv2.addWeighted(img_bgr, 1.0, blurred, -1.0, 128)
+        
+        # Convert back to RGB and PIL
+        if len(high_pass.shape) == 3:
+            high_pass_rgb = cv2.cvtColor(high_pass, cv2.COLOR_BGR2RGB)
+        else:
+            high_pass_rgb = high_pass
+            
+        return Image.fromarray(high_pass_rgb.astype('uint8'))
+        
+    except Exception as e:
+        print(f"⚠️ High pass filter failed: {e}, returning original image")
+        return image
+
+def apply_canny_edge_detection(image: Image.Image, low_threshold: int = 50, high_threshold: int = 150) -> Image.Image:
+    """Apply Canny edge detection"""
+    try:
+        # Convert PIL to numpy array
+        img_array = np.array(image)
+        
+        # Convert to grayscale for Canny
+        if len(img_array.shape) == 3:
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img_array
+        
+        # Apply Canny edge detection
+        edges = cv2.Canny(gray, low_threshold, high_threshold)
+        
+        # Convert back to RGB (edges are white on black background)
+        edges_rgb = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
+        
+        return Image.fromarray(edges_rgb.astype('uint8'))
+        
+    except Exception as e:
+        print(f"⚠️ Canny edge detection failed: {e}, returning original image")
+        return image
+
 # ========================================================================================
 # CONFIGURATION
 # ========================================================================================
@@ -140,12 +338,26 @@ request_counter = 0
 # DATA MODELS
 # ========================================================================================
 
+from enum import Enum
+
+class ModelType(str, Enum):
+    dinov2 = "dinov2"
+    vortex = "vortex"
+
 class ImageRequest(BaseModel):
     image_url: str
+    model: ModelType = ModelType.dinov2  # Default to DINOv2
+    crop: bool = True  # Default to crop (current behavior)
+    high_pass: bool = False  # Apply high pass filter for detail enhancement
+    canny: bool = False  # Apply Canny edge detection
 
 class ImageResponse(BaseModel):
     embedding: list[float]
     image_base64: str
+    model_used: str
+    embedding_dimensions: int
+    background_removed: bool  # Indicates if background was removed and cropped
+    filters_applied: list[str]  # List of applied filters
 
 class HealthResponse(BaseModel):
     status: str
@@ -366,7 +578,7 @@ def generate_vortex_embedding(image: Image.Image) -> list[float]:
 
 @app.get("/", response_model=HealthResponse)
 async def root():
-    """Health check with model status"""
+    """API overview and model status"""
     gpu_info = {}
     if torch.cuda.is_available():
         allocated = get_gpu_memory_usage()
@@ -383,7 +595,7 @@ async def root():
     
     return HealthResponse(
         status="healthy",
-        message="DINO + VORTEX Embedding API 🦕⚡",
+        message="🦕 DINO + VORTEX Embedding API - Unified endpoint with model selection, cropping control, and advanced filters",
         models_available={
             "dinov2_large": dinov2_model is not None,
             "vortex_beitv2": VORTEX_AVAILABLE and vortex_feature_extractor is not None,
@@ -393,16 +605,44 @@ async def root():
     )
 
 @app.post("/process", response_model=ImageResponse)
-async def process_dinov2(request: ImageRequest):
-    """DINOv2 processing endpoint (1536 dimensions)"""
+async def process_image(request: ImageRequest):
+    """
+    Universal image processing endpoint with model selection and filters
+    
+    Parameters:
+    - image_url: URL to the image
+    - model: "dinov2" or "vortex" (default: dinov2)
+    - crop: Whether to remove background and crop to content (default: true)
+    - high_pass: Apply high pass filter for detail enhancement (default: false)
+    - canny: Apply Canny edge detection (default: false)
+    
+    Returns:
+    - embedding: Feature vector
+    - image_base64: Processed image
+    - model_used: Which model was used
+    - embedding_dimensions: Size of the embedding
+    - background_removed: Whether background was removed and image was cropped
+    - filters_applied: List of applied filters
+    """
     global request_counter
     request_counter += 1
     
-    if dinov2_model is None:
+    # Validate model availability
+    if request.model == ModelType.dinov2 and dinov2_model is None:
         raise HTTPException(status_code=503, detail="DINOv2 model not available")
     
+    if request.model == ModelType.vortex:
+        if not VORTEX_AVAILABLE or vortex_feature_extractor is None:
+            raise HTTPException(status_code=503, detail="VORTEX model not available")
+    
     try:
-        print(f"🔄 DINOv2 Request #{request_counter}: Processing...")
+        filters_info = []
+        if request.crop: filters_info.append("crop")
+        if request.high_pass: filters_info.append("high_pass")
+        if request.canny: filters_info.append("canny")
+        
+        filters_suffix = f" + {'+'.join(filters_info)}" if filters_info else ""
+        print(f"🔄 {request.model.upper()} Request #{request_counter}: Processing{filters_suffix}...")
         
         # Smart cleanup
         if should_cleanup():
@@ -412,75 +652,143 @@ async def process_dinov2(request: ImageRequest):
         # Image processing pipeline
         image = download_image(request.image_url)
         image = fix_image_orientation(image)
-        image = remove_background(image)
-        image = crop_to_content(image)
         
-        # DINOv2 embedding
+        applied_filters = []
+        
+        # Conditional background removal and cropping
+        if request.crop:
+            print(f"✂️ Removing background and cropping to content...")
+            image = remove_background(image)
+            image = crop_to_content(image)
+            applied_filters.append("background_removal")
+            applied_filters.append("crop")
+        else:
+            print(f"📐 Keeping original image with background...")
+            # Keep original image, just ensure RGB format
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+        
+        # Apply filters in sequence
+        if request.high_pass:
+            print(f"🔍 Applying high pass filter...")
+            image = apply_high_pass_filter(image)
+            applied_filters.append("high_pass")
+            
+        if request.canny:
+            print(f"📏 Applying Canny edge detection...")
+            image = apply_canny_edge_detection(image)
+            applied_filters.append("canny")
+        
+        # Generate embedding based on selected model
         rgb_image = image.convert('RGB')
-        embedding = generate_dinov2_embedding(rgb_image)
+        
+        if request.model == ModelType.dinov2:
+            embedding = generate_dinov2_embedding(rgb_image)
+            model_name = "DINOv2-Large"
+        elif request.model == ModelType.vortex:
+            embedding = generate_vortex_embedding(rgb_image)
+            model_name = "VORTEX-BeiTv2"
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported model: {request.model}")
         
         # Base64 conversion
         image_base64 = image_to_base64(image)
         
-        print(f"✅ DINOv2 Request #{request_counter}: Completed ({len(embedding)} dims)")
+        print(f"✅ {request.model.upper()} Request #{request_counter}: Completed ({len(embedding)} dims, filters: {applied_filters})")
         
         return ImageResponse(
             embedding=embedding,
-            image_base64=image_base64
+            image_base64=image_base64,
+            model_used=model_name,
+            embedding_dimensions=len(embedding),
+            background_removed=request.crop,
+            filters_applied=applied_filters
         )
         
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ DINOv2 Request #{request_counter}: Error - {str(e)}")
+        print(f"❌ {request.model.upper()} Request #{request_counter}: Error - {str(e)}")
         efficient_cleanup()
-        raise HTTPException(status_code=500, detail=f"DINOv2 processing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"{request.model} processing failed: {str(e)}")
+
+# Legacy endpoints for backward compatibility
+@app.post("/process_dinov2", response_model=ImageResponse)
+async def process_dinov2_legacy(request: ImageRequest):
+    """Legacy DINOv2 endpoint - redirects to main endpoint"""
+    request.model = ModelType.dinov2
+    return await process_image(request)
 
 @app.post("/process_vortex", response_model=ImageResponse)
-async def process_vortex(request: ImageRequest):
-    """VORTEX processing endpoint (texture-optimized features)"""
-    global request_counter
-    request_counter += 1
+async def process_vortex_legacy(request: ImageRequest):
+    """Legacy VORTEX endpoint - redirects to main endpoint"""
+    request.model = ModelType.vortex
+    return await process_image(request)
+
+@app.get("/models")
+async def get_available_models():
+    """Get list of available models and their details"""
+    models = {}
     
-    if not VORTEX_AVAILABLE:
-        raise HTTPException(status_code=503, detail="VORTEX not available - check startup logs")
+    if dinov2_model is not None:
+        models["dinov2"] = {
+            "name": "DINOv2-Large", 
+            "description": "General-purpose visual embeddings",
+            "dimensions": 1024,
+            "best_for": "Object recognition, semantic similarity",
+            "available": True
+        }
     
-    if vortex_feature_extractor is None:
-        raise HTTPException(status_code=503, detail="VORTEX model not initialized")
+    if VORTEX_AVAILABLE and vortex_feature_extractor is not None:
+        models["vortex"] = {
+            "name": "VORTEX-BeiTv2",
+            "description": "Texture-specialized analysis with Vision Transformers", 
+            "dimensions": "Variable (depends on backbone)",
+            "best_for": "Texture recognition, material analysis, surface patterns",
+            "available": True
+        }
     
-    try:
-        print(f"🔄 VORTEX Request #{request_counter}: Processing...")
-        
-        # Smart cleanup
-        if should_cleanup():
-            efficient_cleanup()
-        
-        # Same image processing pipeline
-        image = download_image(request.image_url)
-        image = fix_image_orientation(image)
-        image = remove_background(image)
-        image = crop_to_content(image)
-        
-        # VORTEX embedding
-        rgb_image = image.convert('RGB')
-        embedding = generate_vortex_embedding(rgb_image)
-        
-        # Base64 conversion
-        image_base64 = image_to_base64(image)
-        
-        print(f"✅ VORTEX Request #{request_counter}: Completed ({len(embedding)} dims)")
-        
-        return ImageResponse(
-            embedding=embedding,
-            image_base64=image_base64
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ VORTEX Request #{request_counter}: Error - {str(e)}")
-        efficient_cleanup()
-        raise HTTPException(status_code=500, detail=f"VORTEX processing failed: {str(e)}")
+    return {
+        "available_models": models,
+        "usage": {
+            "endpoint": "POST /process",
+            "parameters": {
+                "image_url": "URL to image (required)",
+                "model": "dinov2 | vortex (default: dinov2)", 
+                "crop": "true | false (default: true) - remove background and crop to content",
+                "high_pass": "true | false (default: false) - apply high pass filter for detail enhancement",
+                "canny": "true | false (default: false) - apply Canny edge detection"
+            },
+            "examples": {
+                "basic_processing": {
+                    "image_url": "https://example.com/image.jpg",
+                    "model": "dinov2"
+                },
+                "texture_analysis_with_high_pass": {
+                    "image_url": "https://example.com/texture.jpg", 
+                    "model": "vortex",
+                    "high_pass": True
+                },
+                "edge_detection_analysis": {
+                    "image_url": "https://example.com/drawing.jpg",
+                    "model": "dinov2", 
+                    "canny": True,
+                    "crop": False
+                },
+                "full_processing": {
+                    "image_url": "https://example.com/complex.jpg",
+                    "model": "vortex",
+                    "crop": True,
+                    "high_pass": True,
+                    "canny": False
+                }
+            }
+        },
+        "legacy_endpoints": {
+            "/process_dinov2": "Legacy DINOv2 endpoint (deprecated)",
+            "/process_vortex": "Legacy VORTEX endpoint (deprecated)"
+        }
+    }
 
 @app.get("/health")
 async def health_check():
@@ -547,10 +855,12 @@ async def manual_cleanup():
 # ========================================================================================
 
 if __name__ == "__main__":
-    print("🚀 Starting DINO + VORTEX Embedding API")
+    print("🚀 Starting DINO + VORTEX Embedding API v2.0")
     print("""
-    🦕 DINOv2: General-purpose visual embeddings (1536 dims)
+    🦕 DINOv2: General-purpose visual embeddings (1024 dims)
     🌪️ VORTEX: Texture Analysis with Vision Transformers
+    🔍 Advanced Filters: High Pass & Canny Edge Detection
+    
     Copyright (c) 2025 scabini - Licensed under MIT License
     https://github.com/scabini/VORTEX
     """)
@@ -570,6 +880,9 @@ if __name__ == "__main__":
     except OSError:
         port = find_free_port()
         print(f"⚠️ Port 7860 busy, using port {port}")
+    
+    print(f"🌐 API will be available at: http://0.0.0.0:{port}")
+    print(f"📚 Interactive docs at: http://0.0.0.0:{port}/docs")
     
     uvicorn.run(
         app,
