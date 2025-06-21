@@ -198,16 +198,25 @@ def initialize_vortex():
         VORTEX_AVAILABLE = False
         return False
 
-class ModelType(str, enum.Enum):
+# Model types - simple string constants
+class ModelType:
     dinov2 = "dinov2"
     vortex = "vortex"
 
 class ImageRequest(BaseModel):
     image_url: str
-    model: ModelType = ModelType.dinov2  # Default to DINOv2
+    model: str = ModelType.dinov2  # Default to DINOv2
     crop: bool = True  # Default to crop (current behavior)
     high_pass: bool = False  # Apply high pass filter for detail enhancement
     canny: bool = False  # Apply Canny edge detection
+    
+    class Config:
+        # Validate model field
+        @staticmethod
+        def validate_model(v):
+            if v not in [ModelType.dinov2, ModelType.vortex]:
+                raise ValueError(f"model must be '{ModelType.dinov2}' or '{ModelType.vortex}'")
+            return v
 
 class ImageResponse(BaseModel):
     embedding: list[float]
@@ -721,6 +730,10 @@ async def process_image(request: ImageRequest):
     if request.model == ModelType.vortex:
         if not VORTEX_AVAILABLE or vortex_feature_extractor is None:
             raise HTTPException(status_code=503, detail="VORTEX model not available")
+    
+    # Validate model parameter
+    if request.model not in [ModelType.dinov2, ModelType.vortex]:
+        raise HTTPException(status_code=400, detail=f"Invalid model. Must be '{ModelType.dinov2}' or '{ModelType.vortex}'")
     
     try:
         filters_info = []
