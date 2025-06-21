@@ -32,7 +32,6 @@ def initialize_vortex():
         if not os.path.exists(vortex_path):
             print(f"⚠️ VORTEX not found at {vortex_path}, attempting to clone...")
             try:
-                import subprocess
                 os.chdir('/workspace/Dino')
                 result = subprocess.run(['git', 'clone', 'https://github.com/scabini/VORTEX.git'], 
                                       capture_output=True, text=True, timeout=60)
@@ -223,6 +222,94 @@ class HealthResponse(BaseModel):
     message: str
     models_available: dict
     gpu_info: dict
+
+def initialize_vortex():
+    """Initialize VORTEX with proper error handling and auto-cloning"""
+    global VORTEX_AVAILABLE, vortex_feature_extractor
+    
+    try:
+        # Save current working directory
+        original_cwd = os.getcwd()
+        
+        # Use absolute path to ensure we find VORTEX
+        vortex_path = '/workspace/Dino/VORTEX'
+        
+        # If VORTEX doesn't exist, try to clone it
+        if not os.path.exists(vortex_path):
+            print(f"⚠️ VORTEX not found at {vortex_path}, attempting to clone...")
+            try:
+                os.chdir('/workspace/Dino')
+                result = subprocess.run(['git', 'clone', 'https://github.com/scabini/VORTEX.git'], 
+                                      capture_output=True, text=True, timeout=60)
+                if result.returncode == 0:
+                    print("✅ VORTEX cloned successfully!")
+                else:
+                    print(f"❌ VORTEX clone failed: {result.stderr}")
+                    return False
+            except Exception as e:
+                print(f"❌ Failed to clone VORTEX: {e}")
+                return False
+        
+        # Check again if VORTEX exists
+        if not os.path.exists(vortex_path):
+            print(f"❌ VORTEX still not found after clone attempt: {vortex_path}")
+            return False
+        
+        print(f"✅ VORTEX path found: {vortex_path}")
+        
+        # Add VORTEX to Python path
+        sys.path.insert(0, vortex_path)
+        
+        # Change to VORTEX directory (needed for weight files)
+        os.chdir(vortex_path)
+        print(f"🔄 Changed working directory to: {os.getcwd()}")
+        
+        # Verify required files exist
+        required_files = ['models.py', 'RAE_LCG_weights.pkl']
+        for file in required_files:
+            if not os.path.exists(file):
+                print(f"❌ Required file missing: {file}")
+                os.chdir(original_cwd)  # Restore original directory
+                return False
+            print(f"✅ Found required file: {file}")
+        
+        # Try importing VORTEX
+        from models import VORTEX
+        print("✅ VORTEX module imported successfully")
+        
+        # Initialize VORTEX with BeiTv2-Large
+        backbone = 'beitv2_large_patch16_224.in1k_ft_in22k_in1k'
+        input_size = 224
+        print(f"🔄 Initializing VORTEX with backbone: {backbone}")
+        
+        vortex_feature_extractor = VORTEX(backbone, input_size)
+        
+        # Restore original working directory
+        os.chdir(original_cwd)
+        print(f"🔄 Restored working directory to: {os.getcwd()}")
+        
+        VORTEX_AVAILABLE = True
+        print("✅ VORTEX (BeiTv2-Large) loaded successfully!")
+        return True
+        
+    except ImportError as e:
+        print(f"⚠️ VORTEX import failed: {e}")
+        # Restore working directory on error
+        try:
+            os.chdir(original_cwd)
+        except:
+            pass
+        VORTEX_AVAILABLE = False
+        return False
+    except Exception as e:
+        print(f"❌ VORTEX initialization failed: {e}")
+        # Restore working directory on error
+        try:
+            os.chdir(original_cwd)
+        except:
+            pass
+        VORTEX_AVAILABLE = False
+        return False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -866,7 +953,6 @@ if __name__ == "__main__":
     """)
     
     # Find available port
-    import socket
     def find_free_port():
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(('', 0))
