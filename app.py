@@ -18,7 +18,7 @@ VORTEX_AVAILABLE = False
 vortex_feature_extractor = None
 
 def initialize_vortex():
-    """Initialize VORTEX with proper error handling and working directory"""
+    """Initialize VORTEX with proper error handling and auto-cloning"""
     global VORTEX_AVAILABLE, vortex_feature_extractor
     
     try:
@@ -28,13 +28,27 @@ def initialize_vortex():
         # Use absolute path to ensure we find VORTEX
         vortex_path = '/workspace/Dino/VORTEX'
         
+        # If VORTEX doesn't exist, try to clone it
         if not os.path.exists(vortex_path):
-            print(f"❌ VORTEX path not found: {vortex_path}")
-            # Try relative path as fallback
-            vortex_path = os.path.join(original_cwd, 'VORTEX')
-            if not os.path.exists(vortex_path):
-                print(f"❌ VORTEX path also not found: {vortex_path}")
+            print(f"⚠️ VORTEX not found at {vortex_path}, attempting to clone...")
+            try:
+                import subprocess
+                os.chdir('/workspace/Dino')
+                result = subprocess.run(['git', 'clone', 'https://github.com/scabini/VORTEX.git'], 
+                                      capture_output=True, text=True, timeout=60)
+                if result.returncode == 0:
+                    print("✅ VORTEX cloned successfully!")
+                else:
+                    print(f"❌ VORTEX clone failed: {result.stderr}")
+                    return False
+            except Exception as e:
+                print(f"❌ Failed to clone VORTEX: {e}")
                 return False
+        
+        # Check again if VORTEX exists
+        if not os.path.exists(vortex_path):
+            print(f"❌ VORTEX still not found after clone attempt: {vortex_path}")
+            return False
         
         print(f"✅ VORTEX path found: {vortex_path}")
         
