@@ -13,6 +13,14 @@ from transformers import AutoModel, AutoImageProcessor
 from rembg import remove, new_session
 import uvicorn
 
+# Try importing asynccontextmanager - fallback if not available
+try:
+    from contextlib import asynccontextmanager
+    HAS_ASYNCCONTEXTMANAGER = True
+except ImportError:
+    HAS_ASYNCCONTEXTMANAGER = False
+    print("⚠️ asynccontextmanager not available - using legacy startup events")
+
 # VORTEX Integration - Fixed Import Path
 VORTEX_AVAILABLE = False
 vortex_feature_extractor = None
