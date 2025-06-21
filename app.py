@@ -13,18 +13,47 @@ from transformers import AutoModel, AutoImageProcessor
 from rembg import remove, new_session
 import uvicorn
 
-# VORTEX Integration
-sys.path.append('./VORTEX')
-try:
-    from models import VORTEX
-    VORTEX_AVAILABLE = True
-    print("✅ VORTEX available")
-except ImportError as e:
-    VORTEX_AVAILABLE = False
-    print(f"⚠️ VORTEX not available: {e}")
+# VORTEX Integration - Fixed Import Path
+VORTEX_AVAILABLE = False
+vortex_feature_extractor = None
+
+def initialize_vortex():
+    """Initialize VORTEX with proper error handling"""
+    global VORTEX_AVAILABLE, vortex_feature_extractor
+    
+    try:
+        # Add VORTEX to Python path
+        vortex_path = os.path.join(os.getcwd(), 'VORTEX')
+        if os.path.exists(vortex_path):
+            sys.path.insert(0, vortex_path)
+            print(f"✅ VORTEX path added: {vortex_path}")
+        else:
+            print(f"❌ VORTEX path not found: {vortex_path}")
+            return False
+        
+        # Try importing VORTEX
+        from models import VORTEX
+        
+        # Initialize VORTEX with BeiTv2-Large
+        backbone = 'beitv2_large_patch16_224.in1k_ft_in22k_in1k'
+        input_size = 224
+        vortex_feature_extractor = VORTEX(backbone, input_size)
+        
+        VORTEX_AVAILABLE = True
+        print("✅ VORTEX (BeiTv2-Large) loaded successfully!")
+        return True
+        
+    except ImportError as e:
+        print(f"⚠️ VORTEX import failed: {e}")
+        VORTEX_AVAILABLE = False
+        return False
+    except Exception as e:
+        print(f"❌ VORTEX initialization failed: {e}")
+        VORTEX_AVAILABLE = False
+        return False
 
 # ========================================================================================
-# KONFIGURACJA
+# CONFIGURATION
 # ========================================================================================
 
 app = FastAPI(
@@ -36,7 +65,6 @@ app = FastAPI(
 # Global models
 dinov2_model = None
 dinov2_processor = None
-vortex_model = None
 rembg_session = None
 
 # Statistics
@@ -60,17 +88,17 @@ class HealthResponse(BaseModel):
     gpu_info: dict
 
 # ========================================================================================
-# MEMORY MANAGEMENT (same as before)
+# MEMORY MANAGEMENT
 # ========================================================================================
 
 def get_gpu_memory_usage() -> float:
-    """Zwraca zużycie pamięci GPU w GB"""
+    """Returns GPU memory usage in GB"""
     if not torch.cuda.is_available():
         return 0.0
     return torch.cuda.memory_allocated() / 1024**3
 
 def should_cleanup() -> bool:
-    """Cleanup TYLKO gdy faktycznie potrzeba"""
+    """Cleanup only when really needed"""
     if torch.cuda.is_available():
         memory_gb = get_gpu_memory_usage()
         total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
@@ -82,17 +110,17 @@ def should_cleanup() -> bool:
     return False
 
 def efficient_cleanup():
-    """Wydajne czyszczenie - minimum overhead"""
+    """Efficient cleanup - minimum overhead"""
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()
 
 # ========================================================================================
-# IMAGE PROCESSING (same as before - reuse your code)
+# IMAGE PROCESSING FUNCTIONS
 # ========================================================================================
 
 def alpha_threshold_bbox(image, min_alpha=30):
-    """Znajduje bounding box na podstawie pikseli z alpha >= min_alpha"""
+    """Find bounding box based on pixels with alpha >= min_alpha"""
     alpha = np.array(image)[:, :, 3]
     rows = np.any(alpha >= min_alpha, axis=1)
     cols = np.any(alpha >= min_alpha, axis=0)
@@ -105,7 +133,7 @@ def alpha_threshold_bbox(image, min_alpha=30):
     return (left, top, right, bottom)
 
 def fix_image_orientation(image: Image.Image) -> Image.Image:
-    """Szybka naprawa orientacji"""
+    """Quick orientation fix"""
     try:
         exif = getattr(image, '_getexif', lambda: None)()
         if exif and 274 in exif:
@@ -172,11 +200,11 @@ def image_to_base64(image: Image.Image) -> str:
 
 def initialize_models():
     """Initialize both DINOv2 and VORTEX models"""
-    global dinov2_model, dinov2_processor, vortex_model, rembg_session
+    global dinov2_model, dinov2_processor, rembg_session
     
     print("🔄 Loading models...")
     
-    # DINOv2-Large (your existing model)
+    # DINOv2-Large
     try:
         dinov2_processor = AutoImageProcessor.from_pretrained(
             'facebook/dinov2-large',
@@ -201,13 +229,7 @@ def initialize_models():
         dinov2_model = None
     
     # VORTEX Model
-    if VORTEX_AVAILABLE:
-        try:
-            vortex_model = VORTEX('beitv2_large_patch16_224.in1k_ft_in22k_in1k', 224)
-            print("✅ VORTEX (BeiTv2-Large) loaded successfully!")
-        except Exception as e:
-            print(f"❌ VORTEX loading failed: {e}")
-            vortex_model = None
+    initialize_vortex()
     
     # rembg
     try:
@@ -221,7 +243,7 @@ def initialize_models():
 # ========================================================================================
 
 def generate_dinov2_embedding(image: Image.Image) -> list[float]:
-    """Generate DINOv2 embedding (your existing method)"""
+    """Generate DINOv2 embedding"""
     try:
         if image.mode != 'RGB':
             image = image.convert('RGB')
@@ -244,11 +266,11 @@ def generate_dinov2_embedding(image: Image.Image) -> list[float]:
 # ========================================================================================
 
 def generate_vortex_embedding(image: Image.Image) -> list[float]:
-    """Generate VORTEX embedding (new method)"""
+    """Generate VORTEX embedding"""
     try:
         from torchvision import transforms
         
-        # VORTEX preprocessing
+        # VORTEX preprocessing (according to their documentation)
         transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
@@ -261,7 +283,8 @@ def generate_vortex_embedding(image: Image.Image) -> list[float]:
         image_tensor = transform(image).unsqueeze(0)
         
         with torch.no_grad():
-            vortex_features = vortex_model(image_tensor)
+            # Use the global VORTEX feature extractor
+            vortex_features = vortex_feature_extractor(image_tensor)
             embedding = vortex_features.squeeze().cpu().numpy().tolist()
         
         del image_tensor, vortex_features
@@ -299,7 +322,7 @@ async def root():
         message="DINO + VORTEX Embedding API 🦕⚡",
         models_available={
             "dinov2_large": dinov2_model is not None,
-            "vortex_beitv2": vortex_model is not None,
+            "vortex_beitv2": VORTEX_AVAILABLE and vortex_feature_extractor is not None,
             "background_removal": rembg_session is not None
         },
         gpu_info=gpu_info
@@ -307,9 +330,7 @@ async def root():
 
 @app.post("/process", response_model=ImageResponse)
 async def process_dinov2(request: ImageRequest):
-    """
-    DINOv2 processing endpoint (your existing method)
-    """
+    """DINOv2 processing endpoint (1536 dimensions)"""
     global request_counter
     request_counter += 1
     
@@ -324,7 +345,7 @@ async def process_dinov2(request: ImageRequest):
             efficient_cleanup()
             print(f"🧹 Memory cleanup performed after request #{request_counter}")
         
-        # Image processing pipeline (same as before)
+        # Image processing pipeline
         image = download_image(request.image_url)
         image = fix_image_orientation(image)
         image = remove_background(image)
@@ -353,17 +374,15 @@ async def process_dinov2(request: ImageRequest):
 
 @app.post("/process_vortex", response_model=ImageResponse)
 async def process_vortex(request: ImageRequest):
-    """
-    VORTEX processing endpoint (new texture-optimized method)
-    """
+    """VORTEX processing endpoint (texture-optimized features)"""
     global request_counter
     request_counter += 1
     
     if not VORTEX_AVAILABLE:
-        raise HTTPException(status_code=503, detail="VORTEX not installed")
+        raise HTTPException(status_code=503, detail="VORTEX not available - check startup logs")
     
-    if vortex_model is None:
-        raise HTTPException(status_code=503, detail="VORTEX model not available")
+    if vortex_feature_extractor is None:
+        raise HTTPException(status_code=503, detail="VORTEX model not initialized")
     
     try:
         print(f"🔄 VORTEX Request #{request_counter}: Processing...")
@@ -402,17 +421,52 @@ async def process_vortex(request: ImageRequest):
 @app.get("/health")
 async def health_check():
     """Detailed health check"""
+    memory_info = {}
+    if torch.cuda.is_available():
+        allocated = get_gpu_memory_usage()
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        memory_info = {
+            "allocated_gb": round(allocated, 2),
+            "total_gb": round(total, 2), 
+            "usage_percent": round((allocated/total)*100, 1),
+            "free_gb": round(total - allocated, 2)
+        }
+    
     return {
         "status": "ok",
         "requests_processed": request_counter,
         "models": {
             "dinov2": dinov2_model is not None,
-            "vortex": vortex_model is not None,
+            "vortex": VORTEX_AVAILABLE and vortex_feature_extractor is not None,
             "rembg": rembg_session is not None
         },
-        "gpu": torch.cuda.is_available(),
-        "vortex_available": VORTEX_AVAILABLE
+        "gpu_available": torch.cuda.is_available(),
+        "memory_info": memory_info,
+        "vortex_details": {
+            "available": VORTEX_AVAILABLE,
+            "backbone": "beitv2_large_patch16_224.in1k_ft_in22k_in1k" if VORTEX_AVAILABLE else None,
+            "input_size": 224 if VORTEX_AVAILABLE else None
+        }
     }
+
+@app.get("/stats")
+async def get_stats():
+    """Detailed statistics"""
+    stats = {
+        "total_requests": request_counter,
+        "cuda_available": torch.cuda.is_available()
+    }
+    
+    if torch.cuda.is_available():
+        allocated = get_gpu_memory_usage()
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        stats["gpu_memory"] = {
+            "allocated_gb": round(allocated, 2),
+            "total_gb": round(total, 2),
+            "usage_percent": round((allocated/total)*100, 1)
+        }
+    
+    return stats
 
 @app.post("/memory/cleanup")
 async def manual_cleanup():
@@ -431,7 +485,8 @@ async def manual_cleanup():
 if __name__ == "__main__":
     print("🚀 Starting DINO + VORTEX Embedding API")
     print("""
-    VORTEX: Texture Analysis with Vision Transformers
+    🦕 DINOv2: General-purpose visual embeddings (1536 dims)
+    🌪️ VORTEX: Texture Analysis with Vision Transformers
     Copyright (c) 2025 scabini - Licensed under MIT License
     https://github.com/scabini/VORTEX
     """)
