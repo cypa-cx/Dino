@@ -32,7 +32,6 @@ def initialize_vortex():
         if not os.path.exists(vortex_path):
             print(f"⚠️ VORTEX not found at {vortex_path}, attempting to clone...")
             try:
-                import subprocess
                 os.chdir('/workspace/Dino')
                 result = subprocess.run(['git', 'clone', 'https://github.com/scabini/VORTEX.git'], 
                                       capture_output=True, text=True, timeout=60)
@@ -866,7 +865,6 @@ if __name__ == "__main__":
     """)
     
     # Find available port
-    import socket
     def find_free_port():
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(('', 0))
