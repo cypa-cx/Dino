@@ -989,12 +989,14 @@ if __name__ == "__main__":
     
     # Find available port
     def find_free_port():
+        import socket
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(('', 0))
             return s.getsockname()[1]
     
     # Try port 7860, if busy use random free port
     try:
+        import socket
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(('0.0.0.0', 7860))
             port = 7860
