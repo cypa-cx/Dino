@@ -342,14 +342,6 @@ For high-throughput scenarios:
 }
 ```
 
-## 🤝 Contributing
-
-Contributions welcome! Please ensure:
-- Code follows existing patterns for memory optimization
-- Both DINOv2 and VORTEX models remain supported
-- New filters are implemented with graceful error handling
-- API compatibility is maintained for existing parameters
-- Performance optimizations are preserved
 
 ## 📄 License
 
